@@ -15,6 +15,7 @@ export class TwitterVideoUploaderController {
   async uploadVideoToTwitter(
     @Body('videoUrl') videoUrl: string,
     @Body('tweetText') tweetText?: string,
+    @Body('replyToTweetId') replyToTweetId?: string,
   ): Promise<any> {
     // Validate video URL
     if (!videoUrl) {
@@ -25,12 +26,15 @@ export class TwitterVideoUploaderController {
       const result = await this.twitterService.uploadVideoToTwitter(
         videoUrl,
         tweetText,
+        replyToTweetId
       );
 
       return result;
     } catch (error: unknown) {
       const errorMessage =
-        error instanceof Error ? error.message : 'An unknown error occurred';
+        error instanceof Error
+          ? error.message
+          : 'Failed to upload video to Twitter';
 
       throw new HttpException(errorMessage, HttpStatus.INTERNAL_SERVER_ERROR);
     }

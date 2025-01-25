@@ -44,6 +44,7 @@ export class TwitterVideoUploaderService {
   async uploadVideoToTwitter(
     videoUrl: string,
     tweetText: string = 'Check out my new video! 🎥 #VideoUpload',
+    replyToTweetId?: string,
   ): Promise<{ id: string }> {
     try {
       // Download video from remote URL
@@ -57,7 +58,7 @@ export class TwitterVideoUploaderService {
       await this.waitForMediaProcessing(mediaId);
 
       // Create tweet
-      const tweetResponse = await this.createTweet(mediaId, tweetText);
+      const tweetResponse = await this.createTweet(mediaId, tweetText, replyToTweetId);
 
       // Clean up local file
       await fs.promises.unlink(localFilePath);
@@ -240,7 +241,11 @@ export class TwitterVideoUploaderService {
     }
   }
 
-  async createTweet(mediaId: string, text: string = 'Uploaded a new video!'): Promise<any> {
+  async createTweet(
+    mediaId: string,
+    text: string = 'Uploaded a new video!',
+    replyToTweetId?: string,
+  ): Promise<any> {
     const tweetUrl = 'https://api.twitter.com/2/tweets';
 
     const accessToken = this.validateCredential('twitter.accessToken');
@@ -259,14 +264,23 @@ export class TwitterVideoUploaderService {
     );
 
     try {
+      const tweetPayload: any = {
+        text: text,
+        media: {
+          media_ids: [mediaId],
+        },
+      };
+
+      // Add reply only if replyToTweetId is provided
+      if (replyToTweetId) {
+        tweetPayload.reply = {
+          in_reply_to_tweet_id: replyToTweetId,
+        };
+      }
+
       const response = await axios.post(
         tweetUrl,
-        {
-          text: text,
-          media: {
-            media_ids: [mediaId],
-          },
-        },
+        tweetPayload,
         {
           headers: {
             ...authHeader,
