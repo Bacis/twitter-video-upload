@@ -41,31 +41,42 @@ export class TwitterVideoUploaderService {
     return credential;
   }
 
-  async uploadVideoToTwitter(
-    videoUrl: string,
-    tweetText: string = 'Check out my new video! 🎥 #VideoUpload',
-    replyToTweetId?: string,
+  async uploadToTwitter(
+    filePathOrUrl: string,
+    options: {
+      tweetText?: string;
+      replyToTweetId?: string;
+      mimeType?: string;
+    } = {}
   ): Promise<{ id: string }> {
+    const { 
+      tweetText = 'Uploaded a new media! 🎥 #MediaUpload', 
+      replyToTweetId 
+    } = options;
+
     try {
-      // Download video from remote URL
-      const localFilePath = await this.downloadVideoFromUrl(videoUrl);
+      // Determine if it's an image or video upload
+      const isImageUpload = options.mimeType?.startsWith('image/');
+      
+      let mediaId: string;
+      if (isImageUpload) {
+        // Use image upload method
+        mediaId = await this.uploadImage(filePathOrUrl);
+      } else {
+        // Use existing video upload method
+        const uploadResponse = await this.uploadVideo(filePathOrUrl);
+        mediaId = uploadResponse.media_id_string;
 
-      // Upload video
-      const uploadResponse = await this.uploadVideo(localFilePath);
-      const mediaId = uploadResponse.media_id_string;
-
-      // Wait for video processing
-      await this.waitForMediaProcessing(mediaId);
+        // Wait for video processing
+        await this.waitForMediaProcessing(mediaId);
+      }
 
       // Create tweet
       const tweetResponse = await this.createTweet(mediaId, tweetText, replyToTweetId);
 
-      // Clean up local file
-      await fs.promises.unlink(localFilePath);
-
       return tweetResponse;
     } catch (error) {
-      this.logger.error('Video upload or tweet process failed', error);
+      this.logger.error('Media upload or tweet process failed', error);
       throw error;
     }
   }
@@ -332,6 +343,95 @@ export class TwitterVideoUploaderService {
       throw new Error(
         `Video download failed: ${error instanceof Error ? error.message : 'Unknown error'}`,
       );
+    }
+  }
+
+  // Add a new method for image uploads
+  async uploadImage(filePath: string): Promise<string> {
+    try {
+      // Validate file exists
+      if (!fs.existsSync(filePath)) {
+        throw new Error(`File not found: ${filePath}`);
+      }
+
+      const fileData = fs.readFileSync(filePath);
+      const fileSize = fs.statSync(filePath).size;
+
+      this.logger.log(`Uploading image: ${path.basename(filePath)}, Size: ${fileSize} bytes`);
+
+      const initUrl = 'https://upload.twitter.com/1.1/media/upload.json';
+      const accessToken = this.validateCredential('twitter.accessToken');
+      const accessTokenSecret = this.validateCredential('twitter.accessTokenSecret');
+
+      // Initialize image upload
+      const initData = {
+        command: 'INIT',
+        total_bytes: fileSize,
+        media_type: 'image/jpeg', // Default to JPEG, adjust based on actual file type if needed
+      };
+
+      const initAuthHeader = this.oauth.toHeader(
+        this.oauth.authorize(
+          { url: initUrl, method: 'POST', data: initData },
+          { key: accessToken, secret: accessTokenSecret }
+        )
+      );
+
+      const initResponse = await axios.post(initUrl, initData, {
+        headers: {
+          ...initAuthHeader,
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+      });
+
+      const mediaId = initResponse.data.media_id_string;
+
+      // Append image data
+      const appendData = {
+        command: 'APPEND',
+        media_id: mediaId,
+        segment_index: 0,
+        media: fileData.toString('base64'),
+      };
+
+      const appendAuthHeader = this.oauth.toHeader(
+        this.oauth.authorize(
+          { url: initUrl, method: 'POST', data: appendData },
+          { key: accessToken, secret: accessTokenSecret }
+        )
+      );
+
+      await axios.post(initUrl, appendData, {
+        headers: {
+          ...appendAuthHeader,
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+      });
+
+      // Finalize image upload
+      const finalizeData = {
+        command: 'FINALIZE',
+        media_id: mediaId,
+      };
+
+      const finalizeAuthHeader = this.oauth.toHeader(
+        this.oauth.authorize(
+          { url: initUrl, method: 'POST', data: finalizeData },
+          { key: accessToken, secret: accessTokenSecret }
+        )
+      );
+
+      await axios.post(initUrl, finalizeData, {
+        headers: {
+          ...finalizeAuthHeader,
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+      });
+
+      return mediaId;
+    } catch (error) {
+      this.logger.error('Image upload failed', error);
+      throw error;
     }
   }
 }
