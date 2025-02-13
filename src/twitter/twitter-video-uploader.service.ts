@@ -2,7 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import * as crypto from 'crypto';
 import * as OAuth from 'oauth-1.0a';
-import axios from 'axios';
+import axios, { AxiosError, AxiosInstance } from 'axios';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -17,6 +17,7 @@ interface OAuthConfig {
 export class TwitterVideoUploaderService {
   private readonly logger = new Logger(TwitterVideoUploaderService.name);
   private oauth: OAuth;
+  private axiosInstance: AxiosInstance;
 
   constructor(private configService: ConfigService) {
     const consumerKey = this.validateCredential('twitter.consumerKey');
@@ -31,6 +32,36 @@ export class TwitterVideoUploaderService {
           .digest('base64');
       },
     });
+
+    // Create axios instance with interceptors
+    this.axiosInstance = axios.create({
+      timeout: 30000, // 30 seconds timeout
+    });
+    
+    this.axiosInstance.interceptors.response.use(
+      response => response,
+      async (error) => {
+        // More comprehensive error handling
+        if (axios.isAxiosError(error) && error.response?.status === 429) {
+          const retryAfter = error.response.headers['retry-after'] 
+            ? parseInt(error.response.headers['retry-after'], 10) 
+            : null;
+          
+          const waitTime = retryAfter 
+            ? retryAfter * 1000 
+            : this.calculateBackoffTime(0);
+          
+          this.logger.warn(`Rate limit hit. Waiting ${waitTime}ms before retry.`);
+          await this.delay(waitTime);
+          
+          // Add null check and type assertion
+          return error.config 
+            ? this.axiosInstance.request(error.config) 
+            : Promise.reject(error);
+        }
+        return Promise.reject(error);
+      }
+    );
   }
 
   private validateCredential(credentialPath: string): string {
@@ -49,14 +80,69 @@ export class TwitterVideoUploaderService {
       mimeType?: string;
     } = {}
   ): Promise<{ id: string }> {
+    // Validate input
+    if (!filePathOrUrl) {
+      throw new Error('File path or URL is required');
+    }
+
+    const MAX_RETRIES = 3;
+    let retryCount = 0;
+
+    while (retryCount < MAX_RETRIES) {
+      try {
+        // Existing upload logic
+        const result = await this.performUpload(filePathOrUrl, options);
+        return result;
+      } catch (error) {
+        // More specific error handling
+        if (axios.isAxiosError(error)) {
+          const axiosError = error as AxiosError;
+          
+          // Check for rate limit error
+          if (axiosError.response?.status === 429) {
+            const waitTime = this.calculateBackoffTime(retryCount);
+            
+            this.logger.warn(`Rate limit hit. Waiting ${waitTime}ms before retry.`);
+            await this.delay(waitTime);
+            
+            retryCount++;
+            continue;
+          }
+          
+          // Log other axios errors
+          this.logger.error('Axios error during upload', {
+            status: axiosError.response?.status,
+            data: axiosError.response?.data,
+            message: axiosError.message
+          });
+        }
+        
+        // If not a rate limit error, rethrow
+        throw error;
+      }
+    }
+
+    throw new Error('Max retries exceeded during Twitter upload');
+  }
+
+  private async performUpload(
+    filePathOrUrl: string,
+    options: {
+      tweetText?: string;
+      replyToTweetId?: string;
+      mimeType?: string;
+    }
+  ): Promise<{ id: string }> {
     const { 
       tweetText = 'Uploaded a new media! 🎥 #MediaUpload', 
       replyToTweetId 
     } = options;
 
     try {
-      // Determine if it's an image or video upload
-      const isImageUpload = options.mimeType?.startsWith('image/');
+      // Determine file type more robustly
+      const isImageUpload = options.mimeType 
+        ? options.mimeType.startsWith('image/') 
+        : this.isImageFile(filePathOrUrl);
       
       let mediaId: string;
       if (isImageUpload) {
@@ -79,6 +165,13 @@ export class TwitterVideoUploaderService {
       this.logger.error('Media upload or tweet process failed', error);
       throw error;
     }
+  }
+
+  // Helper method to determine if file is an image
+  private isImageFile(filePath: string): boolean {
+    const imageExtensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp'];
+    const fileExt = path.extname(filePath).toLowerCase();
+    return imageExtensions.includes(fileExt);
   }
 
   async uploadVideo(filePath: string): Promise<any> {
@@ -433,5 +526,36 @@ export class TwitterVideoUploaderService {
       this.logger.error('Image upload failed', error);
       throw error;
     }
+  }
+
+  // Exponential backoff with jitter
+  private calculateBackoffTime(retryCount: number): number {
+    const baseDelay = 1000; // 1 second
+    const maxDelay = 60000; // 1 minute
+    
+    // Ensure retryCount doesn't go beyond reasonable limits
+    const safeRetryCount = Math.min(retryCount, 5);
+    
+    // Exponential backoff with jitter
+    const delay = Math.min(
+      maxDelay, 
+      baseDelay * Math.pow(2, safeRetryCount)
+    );
+
+    // Add some randomness to prevent thundering herd problem
+    const jitter = Math.random() * 0.5 * delay;
+    return delay + jitter;
+  }
+
+  // Utility method to create a delay with error handling
+  private delay(ms: number): Promise<void> {
+    return new Promise((resolve) => {
+      try {
+        setTimeout(resolve, ms);
+      } catch (error) {
+        this.logger.error('Error in delay method', error);
+        resolve();
+      }
+    });
   }
 }
