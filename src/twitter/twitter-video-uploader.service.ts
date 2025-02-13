@@ -87,22 +87,35 @@ export class TwitterVideoUploaderService {
 
     const MAX_RETRIES = 3;
     let retryCount = 0;
+    let finalFilePath = filePathOrUrl; // Declare finalFilePath here
 
     while (retryCount < MAX_RETRIES) {
       try {
-        // Existing upload logic
-        const result = await this.performUpload(filePathOrUrl, options);
+        // If it's a URL, download the file first
+        if (filePathOrUrl.startsWith('http')) {
+          finalFilePath = await this.downloadVideoFromUrl(filePathOrUrl);
+        }
+
+        const result = await this.performUpload(finalFilePath, options);
         return result;
       } catch (error) {
-        // More specific error handling
+        // More comprehensive retry conditions
         if (axios.isAxiosError(error)) {
           const axiosError = error as AxiosError;
           
-          // Check for rate limit error
-          if (axiosError.response?.status === 429) {
+          // Retry conditions expanded to include more network/server errors
+          const retryableStatusCodes = [
+            429,   // Too Many Requests
+            500,   // Internal Server Error
+            502,   // Bad Gateway
+            503,   // Service Unavailable
+            504    // Gateway Timeout
+          ];
+
+          if (retryableStatusCodes.includes(axiosError.response?.status || 0)) {
             const waitTime = this.calculateBackoffTime(retryCount);
             
-            this.logger.warn(`Rate limit hit. Waiting ${waitTime}ms before retry.`);
+            this.logger.warn(`Retryable error encountered. Status: ${axiosError.response?.status}. Waiting ${waitTime}ms before retry.`);
             await this.delay(waitTime);
             
             retryCount++;
@@ -117,8 +130,17 @@ export class TwitterVideoUploaderService {
           });
         }
         
-        // If not a rate limit error, rethrow
+        // If not a retryable error, rethrow
         throw error;
+      } finally {
+        // Clean up downloaded file if it was a URL
+        if (filePathOrUrl.startsWith('http')) {
+          try {
+            await fs.promises.unlink(finalFilePath);
+          } catch (cleanupError) {
+            this.logger.warn('Failed to clean up temporary file', cleanupError);
+          }
+        }
       }
     }
 
